@@ -273,9 +273,19 @@ class Cumulus(BasePlugin):
             raise error
 
     def remove_svi(self, svi_number):
-        """Delete SVI from switch.
-        This method isn't necessary in this plugin"""
-        pass
+        """Delete SVI from switch."""
+        try:
+            proceed = self._check_pending()
+            if proceed:
+                command = "del vlan %s" % svi_number
+                self._send_nclu_request({'cmd': command})
+                check_warnings = self._search_pending_warnings()
+                if check_warnings:
+                    output = self._search_commit_errors()
+                    return output
+        except Exception as error:
+            log.error('Error: %s' % error)
+            raise error
 
     def ensure_privilege_level(self, privilege_level=None):
         """Cumulus don't use the concept of privilege level"""
