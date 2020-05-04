@@ -17,6 +17,10 @@ from __future__ import with_statement
 
 import hashlib
 import logging
+import requests
+import socket
+import tempfile
+import os
 
 import ldap
 from django.core.exceptions import MultipleObjectsReturned
@@ -27,6 +31,10 @@ from networkapi.models.BaseModel import BaseModel
 from networkapi.system import exceptions
 from networkapi.system.facade import get_value
 from networkapi.util import convert_string_or_int_to_boolean
+from networkapi.util.appcache import get_cache, set_cache
+from networkapi.util.encrypt import encrypt_key, generate_key
+
+from base64 import b64encode
 
 
 class UsuarioError(Exception):
@@ -184,6 +192,77 @@ class Usuario(BaseModel):
         """
         bypass = 0
         try:
+            try:
+                use_cache_user = convert_string_or_int_to_boolean(
+                    get_value('use_cache_user'))
+
+                if use_cache_user:
+                    salt = get_cache('salt_key')
+
+                    if salt:
+                        self.log.debug('The encrypt key was taken successfully!')
+
+                        hash_text = str(username + password)
+                        encrypted_hash_text = encrypt_key(hash_text, salt)
+                        cached_hash_text = get_cache(b64encode(encrypted_hash_text))
+
+                        if cached_hash_text:
+                            self.log.debug('This authentication is using cached user')
+                            pswd = Usuario.encode_password(password)
+                            return Usuario.objects.prefetch_related('grupos').get(user=username, pwd=pswd, ativo=1)
+
+                        else:
+                            set_cache(b64encode(encrypted_hash_text), True, int(get_value('time_cache_user')))
+                            self.log.debug('The user was cached successfully!')
+
+                    else:
+                        salt_key = generate_key()
+                        set_cache('salt_key', salt_key, int(get_value('time_cache_salt_key')))
+                        self.log.debug('The encrypt token was generated and cached successfully!')
+
+            except Exception as ERROR:
+                self.log.error(ERROR)
+
+            # AuthAPI authentication
+            try:
+                use_authapi = convert_string_or_int_to_boolean(get_value('use_authapi'))
+
+                if use_authapi:
+
+                    pswd_authapi = Usuario.encode_password(password)
+                    user = Usuario.objects.prefetch_related('grupos').get(user=username, pwd=pswd_authapi, ativo=1)
+
+                    authapi_info = dict(
+                        mail=user.email,
+                        password=password,
+                        src=socket.gethostbyname(socket.gethostname())
+                    )
+
+                    endpoint_ssl_cert = get_value('endpoint_ssl_cert')
+                    ssl_cert = requests.get(endpoint_ssl_cert)
+
+                    if ssl_cert.status_code == 200:
+
+                        cert = tempfile.NamedTemporaryFile(delete=False)
+                        cert.write(ssl_cert.text)
+                        cert.close()
+
+                        response = requests.post(get_value('authapi_url'), json=authapi_info, verify=cert.name)
+
+                        os.unlink(cert.name)
+
+                        if response.status_code == 200:
+                            return user
+                            self.log.debug('This authentication uses AuthAPI for user \'%s\'' % username)
+                        else:
+                            self.log.debug('Error getting user from AuthAPI. Trying authentication with LDAP')
+
+                    else:
+                        self.log.debug('Error getting SSL certificate from \'%s\'' % endpoint_ssl_cert)
+
+            except Exception as ERROR:
+                self.log.error(ERROR)
+
             try:
                 use_ldap = convert_string_or_int_to_boolean(
                     get_value('use_ldap'))
